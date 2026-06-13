@@ -1,7 +1,9 @@
 import cv2
 import mediapipe as mp
 import math
-import winsound
+import os
+import subprocess
+import time
 
 # ===========================
 # EAR (Eye Aspect Ratio)
@@ -26,10 +28,42 @@ def calculate_EAR(landmarks, eye_indices):
 
 
 # ===========================
-# Winsound Alarm Function
+# Alarm Management
 # ===========================
+alarm_process = None
+last_alarm_time = 0
+ALARM_COOLDOWN = 3.0  # Cooldown between alarms in seconds
+
 def play_alarm():
-    winsound.Beep(2000, 800)  # frequency 2000 Hz, duration 800 ms
+    global alarm_process, last_alarm_time
+    current_time = time.time()
+
+    # Only play alarm if cooldown has passed
+    if current_time - last_alarm_time > ALARM_COOLDOWN:
+        if alarm_process is not None and alarm_process.poll() is None:
+            return  # Already playing
+
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        alarm_path = os.path.join(script_dir, "alarm.wav")
+
+        try:
+            # Use subprocess to manage the sound process so we can terminate it
+            alarm_process = subprocess.Popen(["afplay", alarm_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            last_alarm_time = current_time
+        except Exception as e:
+            print(f"Error playing alarm: {e}")
+
+def stop_alarm():
+    global alarm_process
+    if alarm_process is not None and alarm_process.poll() is None:
+        try:
+            alarm_process.terminate()
+            alarm_process.wait(timeout=0.2)
+        except Exception:
+            try:
+                alarm_process.kill()
+            except Exception:
+                pass
 
 
 # ===========================
@@ -40,10 +74,10 @@ face_mesh = mp_face.FaceMesh(max_num_faces=1, refine_landmarks=True)
 
 cap = cv2.VideoCapture(0)
 
-EAR_THRESHOLD = 0.21      # EAR value below which eyes are considered closed
-CONSEC_FRAMES = 20        # Number of frames to confirm drowsiness
+EAR_THRESHOLD = 0.21              # EAR value below which eyes are considered closed
+DROWSINESS_TIME_LIMIT = 15.0      # Detect drowsiness after 15 seconds of eye closure
 
-counter = 0
+closed_start_time = None
 
 # Eye landmark indices (Mediapipe)
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
@@ -56,6 +90,9 @@ while True:
     success, frame = cap.read()
     if not success:
         break
+
+    # Resize frame to standard size so it is not too large and processing is faster
+    frame = cv2.resize(frame, (640, 480))
 
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = face_mesh.process(rgb_frame)
@@ -72,22 +109,35 @@ while True:
         cv2.putText(frame, f"EAR: {avg_EAR:.2f}", (30, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
-        # Drowsiness logic
+        # Drowsiness logic based on duration in seconds
         if avg_EAR < EAR_THRESHOLD:
-            counter += 1
+            if closed_start_time is None:
+                closed_start_time = time.time()
+            
+            closed_duration = time.time() - closed_start_time
+            
+            # Show closed duration countdown/timer on screen
+            cv2.putText(frame, f"Closed for: {closed_duration:.1f}s", (30, 100),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+            
+            if closed_duration >= DROWSINESS_TIME_LIMIT:
+                cv2.putText(frame, "DROWSINESS DETECTED!", (30, 150),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                play_alarm()
         else:
-            counter = 0
-
-        if counter > CONSEC_FRAMES:
-            cv2.putText(frame, "DROWSINESS DETECTED!", (30, 100),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-
-            play_alarm()  # Alarm beep
+            closed_start_time = None
+            stop_alarm()  # Stop the alarm immediately if the eyes are open
 
     cv2.imshow("Drowsiness Detection", frame)
 
-    if cv2.waitKey(1) & 0xFF == 27:  # ESC to close
+    # Allow closing by pressing ESC, 'q', or clicking the window close button
+    if cv2.getWindowProperty("Drowsiness Detection", cv2.WND_PROP_VISIBLE) < 1:
+        break
+
+    key = cv2.waitKey(1) & 0xFF
+    if key == 27 or key == ord('q'):  # ESC or 'q' to close
         break
 
 cap.release()
 cv2.destroyAllWindows()
+stop_alarm()
